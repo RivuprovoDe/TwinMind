@@ -4,7 +4,7 @@ A web app that listens to live audio from the user's microphone and continuously
 
 Built for the TwinMind Live Suggestions assignment (April 2026).
 
-- **Live demo:** _<paste your Vercel/Netlify/Replit URL here>_
+- **Live demo:** (https://twin-mind-sm5w.vercel.app/)
 - **Stack:** Next.js (App Router) + React + TypeScript + Tailwind, Groq API for both speech-to-text and LLM.
 
 ---
