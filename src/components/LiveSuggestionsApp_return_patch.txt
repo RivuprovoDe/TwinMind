@@ -1,0 +1,67 @@
+  return (
+    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--bg)', color: 'var(--text)', overflow: 'hidden' }}>
+      {/* Top bar */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', borderBottom: '1px solid var(--border)', background: 'var(--panel)', flexShrink: 0 }}>
+        <h1 style={{ fontSize: 14, fontWeight: 600, margin: 0, letterSpacing: '.3px' }}>TwinMind — Live Suggestions</h1>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+            {isRecording ? '● Recording' : 'Idle'}
+          </span>
+          <button
+            onClick={() => exportSession(transcript, suggestionBatches, chat)}
+            style={{ background: 'var(--panel-2)', color: 'var(--text)', border: '1px solid var(--border)', padding: '6px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer' }}
+          >
+            Export JSON
+          </button>
+          <button
+            onClick={() => setShowSettings(!showSettings)}
+            style={{ background: 'var(--panel-2)', color: 'var(--text)', border: '1px solid var(--border)', padding: '6px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer' }}
+          >
+            ⚙ Settings
+          </button>
+        </div>
+      </div>
+
+      {/* Status bar */}
+      <div style={{ padding: '6px 16px', background: 'rgba(110,168,254,.08)', borderBottom: '1px solid rgba(110,168,254,.3)', fontSize: 12, color: '#cfd3dc', flexShrink: 0 }}>
+        {status}
+      </div>
+
+      {/* Main 3-column layout */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, padding: 12, flex: 1, minHeight: 0 }}>
+        <TranscriptPanel 
+          transcript={transcript} 
+          isRecording={isRecording}
+          onToggleRecording={handleToggleRecording}
+        />
+
+        <SuggestionsPanel
+          suggestionBatches={suggestionBatches}
+          countdown={countdown}
+          isRecording={isRecording}
+          isLoadingSuggestions={isLoadingSuggestions}
+          onRefresh={handleManualRefresh}
+          onSuggestionClick={(text, type) =>
+            handleSendToChat(text, type as SuggestionType)
+          }
+        />
+
+        <ChatPanel
+          chat={chat}
+          chatInput={chatInput}
+          isLoadingChat={isLoadingChat}
+          onChatInputChange={setChatInput}
+          onChatSend={handleChatSend}
+        />
+      </div>
+
+      <SettingsModal
+        isOpen={showSettings}
+        apiKey={apiKey}
+        settings={settings}
+        onApiKeyChange={setApiKey}
+        onSettingsChange={setSettings}
+        onClose={() => setShowSettings(false)}
+      />
+    </div>
+  )
