@@ -84,9 +84,10 @@ export const ChatPanel = ({
                   Assistant
                 </div>
                 <div style={{
-                  background: 'var(--panel-2)', border: '1px solid var(--border)',
+                  background: msg.answer.startsWith('⚠') ? 'rgba(239,68,68,.08)' : 'var(--panel-2)',
+                  border: `1px solid ${msg.answer.startsWith('⚠') ? 'rgba(239,68,68,.4)' : 'var(--border)'}`,
                   padding: '10px 12px', borderRadius: 8, fontSize: 13, lineHeight: 1.5,
-                  color: 'var(--text)', whiteSpace: 'pre-wrap',
+                  color: msg.answer.startsWith('⚠') ? 'var(--danger)' : 'var(--text)', whiteSpace: 'pre-wrap',
                 }}>
                   {msg.answer || <span style={{ color: 'var(--muted)' }}>Thinking…</span>}
                 </div>

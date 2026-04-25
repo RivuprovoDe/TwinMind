@@ -79,13 +79,13 @@ const DEFAULT_CHAT_PROMPT = `You are an expert AI meeting copilot. A user is in 
 
 The user is in a LIVE meeting — lead with the most useful point in your first sentence. They may only have 30 seconds to read this.
 
-You have access to the full meeting transcript provided below. Ground every answer in what was actually said. Do not invent context that is not in the transcript.
+You have access to the meeting transcript provided for context. Ground every answer in what was actually said. Do not invent context that is not in the transcript.
 
 Your job: provide a detailed, actionable, and accurate answer.
 
 LANGUAGE — CRITICAL:
-- Detect the language of the user's question (or the clicked suggestion text).
-- Reply in that SAME language and script. Bengali question → Bengali answer. Hindi → Hindi. Urdu → Urdu (Nastaliq). Spanish → Spanish. English → English.
+- Your reply language is determined ONLY by <user_question>. Ignore the language of the transcript entirely.
+- English question → English answer. Bengali question → Bengali answer. Hindi → Hindi. Urdu → Urdu (Nastaliq). Spanish → Spanish.
 - If the question is code-switched, reply in the dominant language of the question.
 
 Guidelines:
@@ -124,6 +124,7 @@ export const LiveSuggestionsApp = () => {
   const apiKeyRef = useRef(apiKey)
   const isLoadingSuggestionsRef = useRef(false)
 
+  // Keep refs in sync so async callbacks always read current values.
   useEffect(() => { transcriptStateRef.current = transcript }, [transcript])
   useEffect(() => { isRecordingRef.current = isRecording }, [isRecording])
   useEffect(() => { settingsRef.current = settings }, [settings])
@@ -186,7 +187,16 @@ export const LiveSuggestionsApp = () => {
       )
       setStatus('Response received')
     } catch (error) {
-      setStatus(`Chat error: ${error instanceof Error ? error.message : String(error)}`)
+      const msg = error instanceof Error ? error.message : String(error)
+      setStatus(`Chat error: ${msg}`)
+      // Mark the stuck entry as failed so it doesn't sit on "Thinking..." forever.
+      setChat((prev) =>
+        prev.map((entry, i) =>
+          i === prev.length - 1 && entry.answer === ''
+            ? { ...entry, answer: `⚠ Failed: ${msg}` }
+            : entry
+        )
+      )
     } finally {
       setIsLoadingChat(false)
     }
@@ -195,20 +205,10 @@ export const LiveSuggestionsApp = () => {
   const streamRef = useRef<MediaStream | null>(null)
   const activeRecordersRef = useRef<Set<MediaRecorder>>(new Set())
 
-  // FIX: align the boundary between two adjacent transcript entries.
-  //
-  // Adjacent chunks overlap by ~2 seconds of audio. Whisper transcribes
-  // the END of a chunk less reliably than the START of one (it has no
-  // future audio to disambiguate the half-cut last word — e.g. it heard
-  // "trans-" and guessed "transformation" instead of "transcript"). So
-  // simply trimming the start of `next` against the end of `prev` fails
-  // when the two transcriptions of the overlap audio differ.
-  //
-  // Strategy: search for the LONGEST matching word run anywhere in the
-  // last K words of `prev` and the first K words of `next`. The matched
-  // run is the bridge — keep it once at the start of `next`, and trim
-  // `prev` from where the matched run begins (which discards Whisper's
-  // unreliable end-of-chunk guess as well).
+  // Whisper is less reliable at the end of a chunk than at the start — it has no
+  // future audio to resolve the final half-cut word. So we overlap adjacent chunks
+  // by ~2 seconds and stitch them together by finding the longest common word run
+  // between the tail of the previous entry and the head of the next one.
   const alignBoundary = useCallback(
     (prev: string, next: string): { newPrev: string | null; newNext: string } => {
       if (!prev || !next) return { newPrev: null, newNext: next }
@@ -224,7 +224,7 @@ export const LiveSuggestionsApp = () => {
       const tail = prevNorm.slice(tailStartIdx)
       const head = nextNorm.slice(0, Math.min(K, nextNorm.length))
 
-      // Longest common contiguous word run.
+      // Find the longest contiguous word run that appears in both tail and head.
       let bestLen = 0
       let bestTailPos = -1
       for (let i = 0; i < tail.length; i++) {
@@ -252,42 +252,23 @@ export const LiveSuggestionsApp = () => {
       const matchEndIdx = cutIdx + bestLen
       const prevSuffix = prevWords.slice(matchEndIdx)
 
-      // FALSE-POSITIVE GUARD #1 — sentence-end punctuation after the match.
-      //
-      // A real audio overlap puts the matched words at the very END of `prev`.
-      // If `prev` still has words AFTER the matched portion AND any of those
-      // trailing words ends with sentence-final punctuation, then `prev` is a
-      // complete utterance whose START coincidentally shares a prefix with
-      // `next`. They are two different questions, NOT one cut-in-half utterance.
-      //
-      // Example that previously merged incorrectly:
-      //   prev = "What is the capital of Egypt?"
-      //   next = "What is the capital of India?"
-      //   match = "What is the capital of" (5 words, at start of both)
-      //   suffix of prev after match = ["Egypt?"] → contains "?" → reject merge.
-      //
-      // Punctuation set covers Latin (.!?), Devanagari/Bengali (।), Arabic (؟),
-      // and CJK (。！？) so the guard works across the multilingual transcripts
-      // this app supports.
+      // Guard against merging two separate questions that happen to share a common
+      // opening phrase (e.g. "What is the capital of Egypt?" vs "...of India?").
+      // If the tail of prev still has sentence-ending punctuation after the match,
+      // it's a completed thought, not an audio overlap — leave both chunks alone.
+      // Covers Latin (.!?), Devanagari/Bengali (।), Arabic (؟), and CJK (。！？).
       const SENTENCE_END = /[.!?।؟。！？]/
       if (prevSuffix.some((w) => SENTENCE_END.test(w))) {
         return { newPrev: null, newNext: next }
       }
 
-      // FALSE-POSITIVE GUARD #2 — too much unmatched content after the match.
-      //
-      // Real audio overlap with Whisper end-of-chunk noise leaves at most
-      // ~1-2 unmatched trailing words in prev. If much more than that follows
-      // the match, the match is in the middle of prev (not at its tail) — it
-      // is a coincidence, not an overlap.
+      // A real audio overlap leaves at most 1-2 stray words after the matched run.
+      // More than that means the match landed in the middle of prev by coincidence.
       const MAX_TAIL_NOISE = 2
       if (prevSuffix.length > MAX_TAIL_NOISE) {
         return { newPrev: null, newNext: next }
       }
 
-      // Trim `prev` from the start of the matched run onward — that drops
-      // both the matched bridge (kept in `next`) and any unreliable
-      // boundary words Whisper invented after it.
       const trimmedPrev = prevWords.slice(0, cutIdx).join(' ').trim()
       return { newPrev: trimmedPrev, newNext: next }
     },
@@ -342,22 +323,14 @@ export const LiveSuggestionsApp = () => {
             : { newPrev: null, newNext: text }
 
           if (lastEntry && aligned.newNext === lastEntry.text) {
-            // Same text as the previous chunk. Common cases:
-            //   1. The user deliberately repeated the same question (e.g.
-            //      because the first attempt failed with a rate-limit error
-            //      and produced no suggestions).
-            //   2. Whisper re-transcribed the same audio after a silent gap.
-            // In either case we do NOT want to append a duplicate transcript
-            // line, BUT we DO want to re-fire suggestions — otherwise a
-            // rate-limited first ask leaves the user stuck with no way to
-            // retry just by speaking again.
+            // Whisper returned the exact same text as the previous chunk.
+            // Still re-fire suggestions so the user can recover from a
+            // rate-limit error by just speaking again.
             setStatus('Same as last chunk — regenerating suggestions')
             resetCountdown()
             runGenerateSuggestions(prevTranscript)
           } else if (!aligned.newNext) {
-            // Overlap fully matched the previous entry's tail — nothing new
-            // to append. Treat this as another retry trigger so the user can
-            // recover from a failed previous suggestion call.
+            // The new chunk was entirely absorbed into the previous entry's tail.
             setStatus('Overlap fully matched — regenerating suggestions')
             resetCountdown()
             runGenerateSuggestions(prevTranscript)
@@ -370,8 +343,8 @@ export const LiveSuggestionsApp = () => {
               } else if (aligned.newPrev.length > 0) {
                 next.push({ ...lastEntry, text: aligned.newPrev })
               }
-              // aligned.newPrev === '' means the entire previous entry was
-              // duplicated — drop it so the new entry stands alone.
+              // aligned.newPrev === '' means the whole previous entry was a
+              // duplicate, so we drop it and let the new entry stand alone.
             }
             next.push({ text: aligned.newNext, timestamp: new Date() })
 
@@ -394,6 +367,7 @@ export const LiveSuggestionsApp = () => {
     const CHUNK_MS = 30000
     const OVERLAP_MS = 2000
 
+    // Start the next recorder 2 seconds before this one stops so the chunks overlap.
     overlapTimer = setTimeout(startNext, CHUNK_MS - OVERLAP_MS)
 
     stopTimer = setTimeout(() => {

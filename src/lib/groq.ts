@@ -2,7 +2,7 @@ import { Suggestion, SuggestionType, TranscriptEntry, Settings } from '@/types'
 
 export const transcribeAudio = async (audioBlob: Blob, apiKey: string): Promise<string> => {
   const formData = new FormData()
-  // FIX: use .webm extension — MediaRecorder produces webm, not wav.
+  // MediaRecorder outputs webm, not wav, so the filename extension matters here.
   formData.append('file', audioBlob, 'audio.webm')
   formData.append('model', 'whisper-large-v3')
 
@@ -21,23 +21,33 @@ export const transcribeAudio = async (audioBlob: Blob, apiKey: string): Promise<
   return data.text?.trim() || ''
 }
 
-// Multilingual language instruction appended to every suggestion + chat call.
-// We do NOT hardcode a language — we let the model detect it from the
-// <current_focus> text itself. This works for English, Bengali, Hindi, Urdu,
-// Spanish, Arabic, code-switched speech, etc.
-const LANGUAGE_INSTRUCTION = `
+// Language is detected from the question/suggestion text for chat, and from
+// <current_focus> for suggestions. We never hardcode a language so the app
+// works for Bengali, Hindi, Arabic, Spanish, etc. out of the box.
+const SUGGESTION_LANGUAGE_INSTRUCTION = `
 LANGUAGE RULE — CRITICAL:
-- Detect the language of the <current_focus> block (or the user question for chat).
-- ALL suggestion "text" fields (or your chat answer) MUST be written in that SAME language and script.
-- If <current_focus> is in Bengali, reply in Bengali. If Hindi, reply in Hindi. If Urdu, reply in Urdu (Nastaliq script). If English, reply in English. If Spanish, reply in Spanish. And so on.
-- Field NAMES ("type", "text") and the "type" enum values ("question", "talking", "answer", "fact") stay in English — only the VALUE of "text" is translated.
-- If the focus mixes two languages (code-switching), reply in the dominant language of the focus.
+- Detect the language of the <current_focus> block.
+- ALL suggestion "text" fields MUST be written in that SAME language and script.
+- Bengali focus → Bengali text. Hindi → Hindi (Devanagari). Urdu → Urdu (Nastaliq). Spanish → Spanish. English → English. And so on.
+- Field NAMES ("type", "text") and the "type" enum values stay in English — only the VALUE of "text" is translated.
+- If the focus mixes two languages, reply in the dominant one.
 - If the focus is unintelligible or empty, fall back to English.`
 
-// Anti-hallucination guardrail. The model is in a LIVE conversation surface,
-// so a confidently wrong fact is worse than no fact. When the model is not
-// sure of a specific name, date, number, citation, or attribution, it should
-// downgrade that suggestion to a clarifying QUESTION instead of inventing.
+// For chat we detect language from the QUESTION TEXT ONLY, not the transcript.
+// The transcript may contain Bengali or other languages from earlier in the
+// session, but if the user clicked an English suggestion or typed in English,
+// they expect an English answer.
+const CHAT_LANGUAGE_INSTRUCTION = `
+LANGUAGE RULE — CRITICAL:
+- Detect the language of <user_question> below.
+- Your ENTIRE answer MUST be in that SAME language and script, regardless of what language the transcript is in.
+- English question → English answer. Bengali question → Bengali answer. Hindi → Hindi. Urdu → Urdu (Nastaliq). Spanish → Spanish. And so on.
+- Never let the transcript language override the question language.
+- If the question mixes two languages, reply in the dominant one.`
+
+// A wrong fact stated confidently in a live meeting is worse than no fact at all.
+// When the model isn't sure about a specific name, number, or date, it should
+// surface a clarifying question instead of guessing.
 const ACCURACY_INSTRUCTION = `
 ACCURACY RULE — CRITICAL:
 - If you are NOT highly confident in a specific name, date, number, statistic, citation, or attribution, you MUST NOT invent one.
@@ -54,21 +64,18 @@ export const generateSuggestions = async (
 ): Promise<Suggestion[]> => {
   if (!apiKey || transcript.length === 0) return []
 
-  // FIX: previously this was /[a-zA-Z]/ which silently dropped every Bengali,
-  // Hindi, Urdu, Arabic, Chinese, etc. transcript entry. Use the Unicode
-  // "Letter" property so any script counts as readable. We still reject
-  // entries that are pure punctuation / whitespace / digits.
+  // The old /[a-zA-Z]/ check silently dropped every non-Latin transcript entry.
+  // Unicode \p{L} catches any script: Bengali, Hindi, Arabic, Chinese, etc.
   const isReadable = (text: string) => /\p{L}/u.test(text)
 
-  // Focus on ONLY the most recent readable entry — what was *just* said.
-  // Older entries flow in as <background_context> for situational awareness
-  // but must NOT drive the suggestions (the system prompt enforces this).
+  // Only the most recent chunk drives suggestions. Older entries are passed as
+  // background context so the model stays aware of the conversation without
+  // drifting away from what was just said.
   const readableEntries = transcript.filter((e) => isReadable(e.text))
   const focusText = readableEntries.slice(-1)[0]?.text ?? ''
 
   if (!focusText) return []
 
-  // BACKGROUND: older readable entries (everything except the focus entry).
   const backgroundEntries = readableEntries.slice(-10, -1)
   const backgroundText = backgroundEntries
     .map((e) => e.text)
@@ -88,22 +95,19 @@ export const generateSuggestions = async (
     body: JSON.stringify({
       model: settings.model,
       messages: [
-        // Always append the language + accuracy instructions so even old saved
-        // prompts get multilingual behaviour AND anti-hallucination behaviour
-        // without the user editing settings.
+        // Language and accuracy rules are appended here so they apply even if
+        // the user edits the system prompt in Settings.
         {
           role: 'system',
           content:
             settings.suggestionPrompt +
-            '\n\n' + LANGUAGE_INSTRUCTION +
+            '\n\n' + SUGGESTION_LANGUAGE_INSTRUCTION +
             '\n\n' + ACCURACY_INSTRUCTION,
         },
         { role: 'user', content: userContent },
       ],
-      // Non-Latin scripts (Bengali, Hindi, Urdu, Arabic, Chinese, etc.) cost
-      // ~3-6x more tokens per character than Latin, so 1024 frequently truncated
-      // the JSON mid-string. 2048 is a comfortable headroom for 3 short suggestions
-      // in any script.
+      // Non-Latin scripts cost 3-6x more tokens per character than Latin, so
+      // 1024 tokens was cutting off mid-JSON for Bengali / Arabic responses.
       max_tokens: 2048,
       temperature: 0.7,
     }),
@@ -146,16 +150,13 @@ export const generateSuggestions = async (
       if (nested) parsed = normaliseSuggestions(nested)
     }
   } catch {
-    // JSON parse failed — most often because the model ran out of tokens
-    // mid-string (especially in non-Latin scripts where characters are
-    // expensive). Salvage every complete {"type": "...", "text": "..."}
-    // object we can find — the trailing one that got cut is just dropped.
+    // The model sometimes runs out of tokens mid-JSON, especially in non-Latin
+    // scripts. Try to salvage any complete objects before giving up.
     try {
       const objectRegex = /\{\s*"type"\s*:\s*"([^"]+)"\s*,\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}/g
       const salvaged: { type: string; text: string }[] = []
       let m: RegExpExecArray | null
       while ((m = objectRegex.exec(content)) !== null) {
-        // Reverse-translate JSON string escapes (\\ \" \n etc.).
         let text = m[2]
         try { text = JSON.parse('"' + m[2] + '"') } catch { /* keep raw */ }
         salvaged.push({ type: m[1], text })
@@ -166,17 +167,19 @@ export const generateSuggestions = async (
     }
   }
 
+  // Numbered list fallback (e.g. "1. ..." or "1) ...")
   if (parsed.length === 0) {
     parsed = content
       .split('\n')
-      .filter((line: string) => line.trim() && /^\d+[\.\)]/.test(line))
+      .filter((line: string) => line.trim() && /^\d+[\.)]/.test(line))
       .map((line: string, i: number) => ({
         type: types[i % 3],
-        text: line.replace(/^\d+[\.\)]\s*/, '').trim(),
+        text: line.replace(/^\d+[\.)] */, '').trim(),
       }))
       .slice(0, 3)
   }
 
+  // Bullet list fallback
   if (parsed.length === 0) {
     parsed = content
       .split('\n')
@@ -221,14 +224,11 @@ export const sendChatMessage = async (
       model: settings.model,
       stream: true,
       messages: [
-        // Same language + accuracy rules applied to chat — answer in the
-        // language of the user's question (or the clicked suggestion), and
-        // refuse to invent specifics; flag uncertainty instead.
         {
           role: 'system',
           content:
             settings.chatPrompt +
-            '\n\n' + LANGUAGE_INSTRUCTION +
+            '\n\n' + CHAT_LANGUAGE_INSTRUCTION +
             '\n\nACCURACY RULE — CRITICAL:\n' +
             '- If you are NOT highly confident in a specific name, date, number, statistic, citation, or attribution, do NOT invent one.\n' +
             '- Either state only the part you are confident about, or explicitly say what would need to be verified before answering (e.g. "I would need to verify the publication year before stating it.").\n' +
@@ -237,7 +237,10 @@ export const sendChatMessage = async (
         },
         {
           role: 'user',
-          content: `Full meeting transcript:\n\n${fullTranscript}${typeContext}\n\nQuestion/Suggestion: ${question}`,
+          // Question comes first so the model reads the language to reply in
+          // before seeing the transcript. If transcript comes first, the model
+          // tends to latch onto its language even when the question is different.
+          content: `<user_question>\n${question}\n</user_question>${typeContext}\n\nMeeting transcript for context:\n\n${fullTranscript}`,
         },
       ],
       max_tokens: 1500,
@@ -268,7 +271,7 @@ export const sendChatMessage = async (
         const text = parsed.choices?.[0]?.delta?.content || ''
         if (text) onChunk(text)
       } catch {
-        // skip malformed chunks
+        // skip malformed SSE chunks
       }
     }
   }

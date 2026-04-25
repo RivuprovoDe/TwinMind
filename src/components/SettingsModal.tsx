@@ -49,7 +49,6 @@ export const SettingsModal = ({
             <div className="w-full text-sm px-3 py-2 border border-gray-600 rounded-lg bg-gray-700 text-gray-300 select-none">
               openai/gpt-oss-120b
             </div>
-            {/* <p className="text-xs text-gray-400 mt-1">Fixed as required by the assignment spec.</p> */}
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-200 mb-1">Live Suggestion Prompt</label>
