@@ -211,7 +211,6 @@ components/
   ChatPanel.tsx            Right column
   SettingsModal.tsx        API key, prompts, context window settings
 hooks/
-  useAudioRecorder.ts
   useCountdown.ts          30s refresh countdown
 lib/
   groq.ts                  All Groq API calls: transcribe, suggestions, streaming chat
